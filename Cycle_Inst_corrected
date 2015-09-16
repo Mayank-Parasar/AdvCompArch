@@ -1,0 +1,654 @@
+/***********************************************************************
+ * File         : pipeline.cpp
+ * Author       : Soham J. Desai 
+ * Date         : 14th January 2014
+ * Description  : Superscalar Pipeline for Lab2 ECE 6100
+ **********************************************************************/
+
+#include "pipeline.h"
+#include <cstdlib>
+
+extern int32_t PIPE_WIDTH;
+extern int32_t ENABLE_MEM_FWD;
+extern int32_t ENABLE_EXE_FWD;
+extern int32_t BPRED_POLICY;
+
+
+/**********************************************************************
+ * Support Function: Read 1 Trace Record From File and populate Fetch Op
+ **********************************************************************/
+
+void pipe_get_fetch_op(Pipeline *p, Pipeline_Latch* fetch_op){
+    uint8_t bytes_read = 0;
+    bytes_read = fread(&fetch_op->tr_entry, 1, sizeof(Trace_Rec), p->tr_file);
+
+    // check for end of trace
+    if( bytes_read < sizeof(Trace_Rec)) {
+      fetch_op->valid=false;
+      p->halt_op_id=p->op_id_tracker;
+      return;
+    }
+
+    // got an instruction ... hooray!
+    fetch_op->valid=true;
+    fetch_op->stall=false;
+    fetch_op->is_mispred_cbr=false;
+    p->op_id_tracker++;
+    fetch_op->op_id=p->op_id_tracker;
+    
+    return; 
+}
+
+
+/**********************************************************************
+ * Pipeline Class Member Functions 
+ **********************************************************************/
+
+Pipeline * pipe_init(FILE *tr_file_in){
+    printf("\n** PIPELINE IS %d WIDE **\n\n", PIPE_WIDTH);
+
+    // Initialize Pipeline Internals
+    Pipeline *p = (Pipeline *) calloc (1, sizeof (Pipeline));
+
+    p->tr_file = tr_file_in;
+    p->halt_op_id = ((uint64_t)-1) - 3;           
+
+    // Allocated Branch Predictor
+    if(BPRED_POLICY){
+      p->b_pred = new BPRED(BPRED_POLICY);
+    }
+
+    return p;
+}
+
+
+/**********************************************************************
+ * Print the pipeline state (useful for debugging)
+ **********************************************************************/
+
+void pipe_print_state(Pipeline *p){
+    std::cout << "--------------------------------------------" << std::endl;
+    std::cout <<"cycle count : " << p->stat_num_cycle << " retired_instruction : " << p->stat_retired_inst << std::endl;
+
+    uint8_t latch_type_i = 0;   // Iterates over Latch Types
+    uint8_t width_i      = 0;   // Iterates over Pipeline Width
+    for(latch_type_i = 0; latch_type_i < NUM_LATCH_TYPES; latch_type_i++) {
+        switch(latch_type_i) {
+            case 0:
+                printf(" IF: ");
+                break;
+            case 1:
+                printf(" ID: ");
+                break;
+            case 2:
+                printf(" EX: ");
+                break;
+            case 3:
+                printf(" MA: ");
+                break;
+            default:
+                printf(" ---- ");
+        }
+    }
+    printf("\n");
+    for(width_i = 0; width_i < PIPE_WIDTH; width_i++) {
+        for(latch_type_i = 0; latch_type_i < NUM_LATCH_TYPES; latch_type_i++) {
+            if(p->pipe_latch[latch_type_i][width_i].valid == true) {
+	      printf(" %6u ",(uint32_t)( p->pipe_latch[latch_type_i][width_i].op_id));
+            } else {
+                printf(" ------ ");
+            }
+        }
+        printf("\n");
+    }
+    printf("\n");
+
+}
+
+
+
+/**********************************************************************
+ * -----------  DO NOT MODIFY THE CODE ABOVE THIS LINE ----------------
+ **********************************************************************/
+
+/**********************************************************************
+ * -----------------------DEBUG FUNCTION-------------------------------
+ *  ******************************************************************/
+void dbg_print (Pipeline *p) {
+
+ printf("\n#####################( %d )####################\n", p->stat_num_cycle);
+ printf("Retired Instruction: %d\n", p->stat_retired_inst);
+
+ printf("Number of instructions in this Pipe: %d\n", PIPE_WIDTH);
+ printf("Type of Instruction in this pipe:\n");
+
+// MA STAGE
+
+printf("=========MA_LATCH===========\n");
+int ii;
+for (ii=0; ii<PIPE_WIDTH; ii++) {
+    printf("p->pipe_latch[MA_LATCH][%d].op_id %d\t", ii, p->pipe_latch[MA_LATCH][ii].op_id);
+    if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == OP_ALU) {
+        printf ("OP_ALU\t");
+        } else if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == OP_LD) {
+         printf ("OP_LD\t");
+        } else if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == OP_ST) { 
+        printf ("OP_LD\t");
+        } else if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == OP_CBR) {
+        printf ("OP_CBR\t");
+        } else if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == OP_OTHER) {
+        printf ("OP_OTHER\t");
+        } else if (p->pipe_latch[MA_LATCH][ii].tr_entry.op_type == NUM_OP_TYPE) {
+        printf("NUM_OP_TYPE\t");
+        } else {
+        printf("Not a valid OP!!\t");
+        }
+    if (p->pipe_latch[MA_LATCH][ii].valid)
+            printf("valid\t");
+    else 
+            printf("not-valid\t");
+    if (p->pipe_latch[MA_LATCH][ii].stall)
+        printf("stalled\n");
+    else
+        printf("not-stalled\n");
+    }
+// EX STAGE
+printf("=========EX_LATCH===========\n");
+for (ii=0; ii<PIPE_WIDTH; ii++) {
+    printf("p->pipe_latch[EX_LATCH][%d].op_id %d\t", ii, p->pipe_latch[EX_LATCH][ii].op_id);
+    if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == OP_ALU) {
+        printf ("OP_ALU\t");
+        } else if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == OP_LD) {
+         printf ("OP_LD\t");
+        } else if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == OP_ST) { 
+        printf ("OP_LD\t");
+        } else if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == OP_CBR) {
+        printf ("OP_CBR\t");
+        } else if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == OP_OTHER) {
+        printf ("OP_OTHER\t");
+        } else if (p->pipe_latch[EX_LATCH][ii].tr_entry.op_type == NUM_OP_TYPE) {
+        printf("NUM_OP_TYPE\t");
+        } else {
+        printf("Not a valid OP!!\t");
+        }
+        if (p->pipe_latch[EX_LATCH][ii].valid)
+            printf("valid\t");
+        else 
+            printf("not-valid\t");
+        if (p->pipe_latch[EX_LATCH][ii].stall)
+            printf("stalled\n");
+        else
+            printf("not-stalled\n");
+    }
+// ID STAGE
+printf("=========ID_LATCH===========\n");
+for (ii=0; ii<PIPE_WIDTH; ii++) {
+    printf("p->pipe_latch[ID_LATCH][%d].op_id %d\t", ii, p->pipe_latch[ID_LATCH][ii].op_id);
+    if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_ALU) {
+        printf ("OP_ALU\t");
+        } else if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_LD) {
+         printf ("OP_LD\t");
+        } else if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_ST) { 
+        printf ("OP_LD\t");
+        } else if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_CBR) {
+        printf ("OP_CBR\t");
+        } else if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_OTHER) {
+        printf ("OP_OTHER\t");
+        } else if (p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == NUM_OP_TYPE) {
+        printf("NUM_OP_TYPE\t");
+        } else {
+        printf("Not a valid OP!!\t");
+        }
+    if (p->pipe_latch[ID_LATCH][ii].valid)
+            printf("valid\t");
+    else 
+            printf("not-valid\t");
+    if (p->pipe_latch[ID_LATCH][ii].stall)
+        printf("stalled\n");
+    else
+        printf("not-stalled\n");
+    }
+// IF STAGE
+printf("=========IF_LATCH===========\n");
+for (ii=0; ii<PIPE_WIDTH; ii++) {
+    printf("p->pipe_latch[IF_LATCH][%d].op_id %d \t", ii, p->pipe_latch[IF_LATCH][ii].op_id);
+    if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == OP_ALU) {
+        printf ("OP_ALU\t");
+        } else if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == OP_LD) {
+         printf ("OP_LD\t");
+        } else if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == OP_ST) { 
+        printf ("OP_LD\t");
+        } else if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == OP_CBR) {
+        printf ("OP_CBR\t");
+        } else if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == OP_OTHER) {
+        printf ("OP_OTHER\t");
+        } else if (p->pipe_latch[IF_LATCH][ii].tr_entry.op_type == NUM_OP_TYPE) {
+        printf("NUM_OP_TYPE\t");
+        } else {
+        printf("Not a valid OP!!\t");
+        }
+    if (p->pipe_latch[IF_LATCH][ii].valid)
+            printf("valid\t");
+    else 
+            printf("not-valid\t");
+    if (p->pipe_latch[IF_LATCH][ii].stall)
+        printf("stalled\n");
+    else
+        printf("not-stalled\n");
+    }
+printf("###################################################\n");
+}
+/**********************************************************************
+ * Pipeline Main Function: Every cycle, cycle the stage 
+ **********************************************************************/
+ 
+
+void pipe_cycle(Pipeline *p)
+{
+    p->stat_num_cycle++;
+    pipe_cycle_WB(p);
+    pipe_cycle_MA(p);
+    pipe_cycle_EX(p);
+    pipe_cycle_ID(p);
+    pipe_cycle_IF(p);
+//    dbg_print(p);
+    pipe_print_state(p);
+	    
+}
+/**********************************************************************
+ * -------------------------PIPE_LINE FUNCTION-------------------------
+ *  ******************************************************************/
+
+void pipe_cycle_WB(Pipeline *p){
+  int ii;
+/*
+    for(ii=0; ii<PIPE_WIDTH; ii++){
+        if(p->pipe_latch[MA_LATCH][ii].op_id >= p->halt_op_id){
+ 	        p->halt=true; 
+        }else if(p->pipe_latch[MA_LATCH][ii].valid){
+            p->stat_retired_inst++;
+            if (p->fetch_cbr_stall && (p->pipe_latch[MA_LATCH][ii].is_mispred_cbr))
+TODO--->                    p->fetch_cbr_stall = false;
+            }
+        }
+*/
+
+  for(ii=0; ii<PIPE_WIDTH; ii++){
+    if(p->pipe_latch[MA_LATCH][ii].valid){
+      p->stat_retired_inst++;
+      if(p->pipe_latch[MA_LATCH][ii].op_id >= p->halt_op_id){
+	p->halt=true;
+        printf("This is the halt instruction; p->stat_num_cycle: %d\n", p->stat_num_cycle);
+      }
+    }
+  }
+
+
+    } 
+
+//--------------------------------------------------------------------//
+  
+void pipe_cycle_MA(Pipeline *p){
+  int ii;
+  for(ii=0; ii<PIPE_WIDTH; ii++){
+    p->pipe_latch[MA_LATCH][ii]=p->pipe_latch[EX_LATCH][ii];
+  }
+//  if (p->fetch_cbr_stall)
+//        p->fetch_cbr_stall = false;
+
+}
+
+//--------------------------------------------------------------------//
+
+void pipe_cycle_EX(Pipeline *p){
+  int ii;
+  for(ii=0; ii<PIPE_WIDTH; ii++){
+    p->pipe_latch[EX_LATCH][ii]=p->pipe_latch[ID_LATCH][ii];
+  }
+}
+
+//--------------------------------------------------------------------//
+
+void pipe_cycle_ID(Pipeline *p){
+int ii,k;
+
+Pipeline_Latch tmp_ID_LATCH;
+
+  for(ii=0; ii<PIPE_WIDTH; ii++){
+   if (!(p->pipe_latch[IF_LATCH][ii].stall)) {
+        p->pipe_latch[ID_LATCH][ii]=p->pipe_latch[IF_LATCH][ii];
+//        printf("p->fetch_cbr_stall: %d\n");
+        printf("p->pipe_latch[ID_LATCH][%d].valid: %d\n", ii, p->pipe_latch[ID_LATCH][ii].valid);
+    }
+}
+   
+if (PIPE_WIDTH == 2) {// ALways maintain order
+    if (p->stat_num_cycle > 2) { //trying to avoid initial op_id
+    if (p->pipe_latch[ID_LATCH][0].op_id > p->pipe_latch[ID_LATCH][1].op_id) {
+       tmp_ID_LATCH =  p->pipe_latch[ID_LATCH][0];
+       p->pipe_latch[ID_LATCH][0] =  p->pipe_latch[ID_LATCH][1];
+       p->pipe_latch[ID_LATCH][1] = tmp_ID_LATCH;
+        }
+    }       
+}
+
+  for(ii=0; ii<PIPE_WIDTH; ii++){ 
+    for(k=0; k<PIPE_WIDTH; k++) { // for each instruction in ID_LATCH it will compare
+                                    // all EX; MEM and CBR dependencies   
+          if((k>0) && (p->pipe_latch[ID_LATCH][ii].stall)) {
+                break;
+            } 
+                         // EX-ID dependency                                         
+                          // SRC1 
+            if ((p->pipe_latch[EX_LATCH][k].valid) &&
+                ((p->pipe_latch[EX_LATCH][k].tr_entry.dest_needed) && 
+                   (p->pipe_latch[EX_LATCH][k].tr_entry.dest ==          
+                    p->pipe_latch[ID_LATCH][ii].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src1_needed))) {
+                                p->pipe_latch[ID_LATCH][ii].stall = true;
+                                p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("EX-ID-SCR1 dependency: %d\n", __LINE__); 
+                        // EX-ID dependency
+                        // SRC2                
+            } else if((p->pipe_latch[EX_LATCH][k].valid) &&
+                    ((p->pipe_latch[EX_LATCH][k].tr_entry.dest_needed) &&
+                    (p->pipe_latch[EX_LATCH][k].tr_entry.dest ==          
+                    p->pipe_latch[ID_LATCH][ii].tr_entry.src2_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src2_needed))) {
+                        p->pipe_latch[ID_LATCH][ii].stall = true;
+                        p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("EX-ID-SCR2 dependency: %d\n", __LINE__); 
+                        // MA-ID dependency
+                        // SRC1
+            } else if ((p->pipe_latch[MA_LATCH][k].valid) &&
+                        ((p->pipe_latch[MA_LATCH][k].tr_entry.dest_needed) &&
+                        (p->pipe_latch[MA_LATCH][k].tr_entry.dest ==
+                        p->pipe_latch[ID_LATCH][ii].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src1_needed))) {
+                        p->pipe_latch[ID_LATCH][ii].stall = true;
+                        p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("MA-ID-SCR1 dependency: %d\n", __LINE__); 
+                        // MA-ID dependency
+                        // SRC2
+            } else if ((p->pipe_latch[MA_LATCH][k].valid) &&
+                ((p->pipe_latch[MA_LATCH][k].tr_entry.dest_needed) && 
+                (p->pipe_latch[MA_LATCH][k].tr_entry.dest == 
+                p->pipe_latch[ID_LATCH][ii].tr_entry.src2_reg) &&
+                (p->pipe_latch[ID_LATCH][ii].tr_entry.src2_needed))) {
+                    p->pipe_latch[ID_LATCH][ii].stall = true;
+                    p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("MA-ID-SCR2 dependency: %d\n", __LINE__); 
+                 // Conditional Branch at EX-ID dependency
+            } else if ((p->pipe_latch[EX_LATCH][k].valid) &&
+                ((p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_CBR) &&
+                 (p->pipe_latch[EX_LATCH][k].tr_entry.cc_write))) {
+                p->pipe_latch[ID_LATCH][ii].stall = true;
+                p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("EX-ID-CBR dependency: %d\n", __LINE__); 
+                // Conditional Branch at MA-ID dependency
+                } else if ((p->pipe_latch[MA_LATCH][k].valid) && 
+                    ((p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_CBR) &&
+                    (p->pipe_latch[MA_LATCH][k].tr_entry.cc_write))) {
+                    p->pipe_latch[ID_LATCH][ii].stall = true;
+                    p->pipe_latch[ID_LATCH][ii].valid = false;
+                        printf("MA-ID-CBR dependency: %d\n", __LINE__); 
+                } else { // Crucial code, if commented gives closer CPI to sml-benchmark
+                        // but code doesn't run w/o frwding. gcc has no effect by this. 
+                        p->pipe_latch[ID_LATCH][ii].stall = false;
+                        p->pipe_latch[ID_LATCH][ii].valid = true;   
+                        printf("No dependency: %d\n", __LINE__); 
+                }
+            }
+        }
+        // print the 'stall' and 'valid' due to inter-dependency here:
+        // Intra-dependency you don't want to do it in loop.
+        // done in the end when all inter-dependencies calculated
+        if (PIPE_WIDTH == 2) {
+            if (!(p->pipe_latch[ID_LATCH][0].stall) && !(p->pipe_latch[ID_LATCH][1].stall)) {
+
+                if  (((p->pipe_latch[ID_LATCH][0].tr_entry.dest_needed) && 
+                    (p->pipe_latch[ID_LATCH][0].tr_entry.dest == 
+                    p->pipe_latch[ID_LATCH][1].tr_entry.src2_reg) &&
+                    (p->pipe_latch[ID_LATCH][1].tr_entry.src2_needed))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid = false;    
+                    printf("ID-[0]-[1]-SCR2 dependency: %d\n", __LINE__);                                        
+                    } else if (((p->pipe_latch[ID_LATCH][0].tr_entry.dest_needed) && 
+                    (p->pipe_latch[ID_LATCH][0].tr_entry.dest == 
+                    p->pipe_latch[ID_LATCH][1].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][1].tr_entry.src1_needed))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid = false;    
+                    printf("ID-[0]-[1]-SCR1 dependency: %d\n", __LINE__);                                        
+                    } else if ((p->pipe_latch[ID_LATCH][0].valid) &&
+                        ((p->pipe_latch[ID_LATCH][1].tr_entry.op_type == OP_CBR) &&
+                        (p->pipe_latch[ID_LATCH][0].tr_entry.cc_write))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid = false;   
+                    printf("ID-[0]-[1]-CBR dependency: %d\n", __LINE__);                                        
+                    }
+
+                } else if (!(ENABLE_MEM_FWD) && !(ENABLE_EXE_FWD) &&
+                    (p->pipe_latch[ID_LATCH][0].stall) && !(p->pipe_latch[ID_LATCH][1].stall)) {
+                    p->pipe_latch[ID_LATCH][1].stall = true;
+                    p->pipe_latch[ID_LATCH][1].valid = false;
+                    printf("ID-[0]-[1]-Stall dependency: %d\n", __LINE__);                                        
+                }
+        }
+    if(ENABLE_MEM_FWD){
+
+    int ii, k;
+        for (ii=0; ii<PIPE_WIDTH; ii++) { // foreach ID 
+            for (k=0; k<PIPE_WIDTH; k++) { // Check with each MEM
+                    //MA-ID dependency
+                    // SCR1
+                if ((p->pipe_latch[MA_LATCH][k].valid) &&
+                        ((p->pipe_latch[MA_LATCH][k].tr_entry.dest_needed) &&
+                        (p->pipe_latch[MA_LATCH][k].tr_entry.dest ==
+                        p->pipe_latch[ID_LATCH][ii].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src1_needed))) {
+                        p->pipe_latch[ID_LATCH][ii].stall = false;
+                        p->pipe_latch[ID_LATCH][ii].valid = true;
+                    printf("[ENABLE_MEM_FWD]:MA-ID-SCR1 dependency: %d\n", __LINE__);                                        
+                        // MA-ID dependency
+                        // SRC2
+                } else if ((p->pipe_latch[MA_LATCH][k].valid) &&
+                    ((p->pipe_latch[MA_LATCH][k].tr_entry.dest_needed) && 
+                    (p->pipe_latch[MA_LATCH][k].tr_entry.dest == 
+                    p->pipe_latch[ID_LATCH][ii].tr_entry.src2_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src2_needed))) {
+                        p->pipe_latch[ID_LATCH][ii].stall = false;
+                        p->pipe_latch[ID_LATCH][ii].valid = true;
+                    printf("[ENABLE_MEM_FWD]:MA-ID-SCR2 dependency: %d\n", __LINE__);                                        
+                    
+                 // Conditional Branch at MA-ID dependency
+            } else if ((p->pipe_latch[MA_LATCH][k].valid) && 
+                    ((p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_CBR) &&
+                    (p->pipe_latch[MA_LATCH][k].tr_entry.cc_write))) {
+                    p->pipe_latch[ID_LATCH][ii].stall = false;
+                    p->pipe_latch[ID_LATCH][ii].valid = true;
+                    printf("[ENABLE_MEM_FWD]:MA-ID-CBR dependency: %d\n", __LINE__);                                        
+                    }
+            }
+        }
+
+    }
+
+    if(ENABLE_EXE_FWD){
+     int ii, k;
+        for (ii=0; ii<PIPE_WIDTH; ii++) { // foreach ID 
+            for (k=0; k<PIPE_WIDTH; k++) { // Check with each EX
+                         // EX-ID dependency                                         
+                          // SRC1 
+                if ((!(p->pipe_latch[EX_LATCH][k].tr_entry.op_type == OP_LD)) &&
+                    (p->pipe_latch[EX_LATCH][k].valid) &&
+                    ((p->pipe_latch[EX_LATCH][k].tr_entry.dest_needed) && 
+                    (p->pipe_latch[EX_LATCH][k].tr_entry.dest ==          
+                    p->pipe_latch[ID_LATCH][ii].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src1_needed))) {
+                                p->pipe_latch[ID_LATCH][ii].stall = false;
+                                p->pipe_latch[ID_LATCH][ii].valid = true; 
+                    printf("[ENABLE_EX_FWD]:EX-ID-SCR1 dependency: %d\n", __LINE__);                                        
+                        
+                        // EX-ID dependency
+                        // SRC2                
+                } else if((!(p->pipe_latch[EX_LATCH][k].tr_entry.op_type == OP_LD)) &&
+                    (p->pipe_latch[EX_LATCH][k].valid) &&
+                    ((p->pipe_latch[EX_LATCH][k].tr_entry.dest_needed) &&
+                    (p->pipe_latch[EX_LATCH][k].tr_entry.dest ==          
+                    p->pipe_latch[ID_LATCH][ii].tr_entry.src2_reg) &&
+                    (p->pipe_latch[ID_LATCH][ii].tr_entry.src2_needed))) {
+                        p->pipe_latch[ID_LATCH][ii].stall = false;
+                        p->pipe_latch[ID_LATCH][ii].valid = true;
+                    printf("[ENABLE_EX_FWD]:EX-ID-SCR2 dependency: %d\n", __LINE__);                                        
+                        
+                 // Conditional Branch at EX-ID dependency
+            } else if ((!(p->pipe_latch[EX_LATCH][k].tr_entry.op_type == OP_LD)) &&
+                    (p->pipe_latch[EX_LATCH][k].valid) &&
+                    ((p->pipe_latch[ID_LATCH][ii].tr_entry.op_type == OP_CBR) &&
+                    (p->pipe_latch[EX_LATCH][k].tr_entry.cc_write))) {
+                    p->pipe_latch[ID_LATCH][ii].stall = false;
+                    p->pipe_latch[ID_LATCH][ii].valid = true;
+                    printf("[ENABLE_EX_FWD]:EX-ID-CBR dependency: %d\n", __LINE__);                                        
+                }
+            }
+        }    
+
+            if (!(p->pipe_latch[ID_LATCH][0].stall) && !(p->pipe_latch[ID_LATCH][1].stall)) {
+
+                if  (((p->pipe_latch[ID_LATCH][0].tr_entry.dest_needed) && 
+                    (p->pipe_latch[ID_LATCH][0].tr_entry.dest == 
+                    p->pipe_latch[ID_LATCH][1].tr_entry.src2_reg) &&
+                    (p->pipe_latch[ID_LATCH][1].tr_entry.src2_needed))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid = false;    
+                    printf("[ENABLE_EX_FWD]:ID-[0]-[1]-SCR2 dependency: %d\n", __LINE__);                                        
+                    } else if (((p->pipe_latch[ID_LATCH][0].tr_entry.dest_needed) && 
+                    (p->pipe_latch[ID_LATCH][0].tr_entry.dest == 
+                    p->pipe_latch[ID_LATCH][1].tr_entry.src1_reg) &&
+                    (p->pipe_latch[ID_LATCH][1].tr_entry.src1_needed))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid = false;    
+                    printf("[ENABLE_EX_FWD]:ID-[0]-[1]-SCR1 dependency: %d\n", __LINE__);                                        
+                    } else if ((p->pipe_latch[ID_LATCH][0].valid) &&
+                        ((p->pipe_latch[ID_LATCH][1].tr_entry.op_type == OP_CBR) &&
+                        (p->pipe_latch[ID_LATCH][0].tr_entry.cc_write))) {
+                        p->pipe_latch[ID_LATCH][1].stall = true;
+                        p->pipe_latch[ID_LATCH][1].valid =  false;   
+                    printf("[ENABLE_EX_FWD]:ID-[0]-[1]-CBR dependency: %d\n", __LINE__);                                        
+                    }
+
+                } 
+        }
+
+  
+        if ( ENABLE_MEM_FWD && ENABLE_EXE_FWD &&
+                (p->pipe_latch[ID_LATCH][0].stall) && !(p->pipe_latch[ID_LATCH][1].stall)) {
+                    p->pipe_latch[ID_LATCH][1].stall = true;
+                    p->pipe_latch[ID_LATCH][1].valid = false;
+                }
+
+
+  if (p->fetch_cbr_stall && !(p->pipe_latch[IF_LATCH][0].valid) && !(p->pipe_latch[IF_LATCH][1].valid)) {
+    p->pipe_latch[ID_LATCH][0].valid = false;
+    p->pipe_latch[ID_LATCH][1].valid = false;
+
+    } /*else if (!(p->pipe_latch[IF_LATCH][0].valid) && !(p->pipe_latch[IF_LATCH][1].valid) &&
+                !(p->pipe_latch[IF_LATCH][0].stall) && !(p->pipe_latch[IF_LATCH][1].stall)) {
+            p->pipe_latch[ID_LATCH][0].valid = false;
+            p->pipe_latch[ID_LATCH][1].valid = false;
+            
+        }*/
+
+ // Code to get cycle count and retired_insn correct
+    for(ii=0; ii<PIPE_WIDTH; ii++) {
+        if (p->pipe_latch[ID_LATCH][ii].op_id == 0) {
+            p->pipe_latch[ID_LATCH][ii].valid = false;
+        }            
+    }
+ // Code to get retired_insn correct
+    if (PIPE_WIDTH == 2) {
+        if ((p->pipe_latch[ID_LATCH][0].op_id == p->pipe_latch[ID_LATCH][1].op_id) &&
+            (p->pipe_latch[ID_LATCH][0].valid) && (p->pipe_latch[ID_LATCH][1].valid)) {
+                p->pipe_latch[ID_LATCH][0].valid = false;
+        }
+    }
+}
+
+
+//--------------------------------------------------------------------//
+
+void pipe_cycle_IF(Pipeline *p) {
+  int ii;
+  Pipeline_Latch fetch_op;
+  bool tr_read_success;
+
+if (!(p->fetch_cbr_stall)) {
+ for(ii=0; ii<PIPE_WIDTH; ii++){
+
+ if (!(p->pipe_latch[IF_LATCH][ii].stall)) {
+
+        pipe_get_fetch_op(p, &fetch_op);
+
+        if(BPRED_POLICY){
+        pipe_check_bpred(p, &fetch_op);
+        }
+    
+        // copy the op in IF LATCH
+        p->pipe_latch[IF_LATCH][ii]=fetch_op;
+      }
+ if  (p->pipe_latch[ID_LATCH][ii].stall) {
+                p->pipe_latch[IF_LATCH][ii].stall = true;
+        } else {
+                p->pipe_latch[IF_LATCH][ii].stall = false;
+        }
+    }
+ } else { // there is cbr_stall put valid of these inst as false as we are not fetching
+
+    p->pipe_latch[IF_LATCH][0].valid = false;
+    p->pipe_latch[IF_LATCH][1].valid = false;
+
+ }
+
+
+if (PIPE_WIDTH == 2) {// ALways maintain order
+  if (p->stat_num_cycle > 1) {
+    if (p->pipe_latch[IF_LATCH][0].op_id > p->pipe_latch[IF_LATCH][1].op_id) {
+       fetch_op =  p->pipe_latch[IF_LATCH][0];
+       p->pipe_latch[IF_LATCH][0] =  p->pipe_latch[IF_LATCH][1];
+       p->pipe_latch[IF_LATCH][1] = fetch_op;
+            }
+        }
+    }
+}
+
+
+//--------------------------------------------------------------------//
+
+void pipe_check_bpred(Pipeline *p, Pipeline_Latch *fetch_op){
+  // call branch predictor here, if mispred then mark in fetch_op
+  // update the predictor instantly
+  // stall fetch using the flag p->fetch_cbr_stall
+
+uint64_t PC = fetch_op->tr_entry.inst_addr;
+
+    if(fetch_op->tr_entry.op_type == OP_CBR) {
+            p->b_pred->stat_num_branches++; 
+       if (fetch_op->tr_entry.br_dir != p->b_pred->GetPrediction(PC)) {    
+            //p->b_pred->stat_num_branches++; 
+//            printf("Branch-misprediction!\n");
+            p->b_pred->stat_num_mispred++; 
+            p->fetch_cbr_stall = true;
+            fetch_op->is_mispred_cbr = true;
+        } else {
+//            printf("Branch-predicted correctly!\n");
+            p->fetch_cbr_stall = false;
+            fetch_op->is_mispred_cbr = false;            
+
+        }
+    }
+}
+
+
+//--------------------------------------------------------------------//
+
