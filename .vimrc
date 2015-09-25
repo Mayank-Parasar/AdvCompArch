@@ -1,5 +1,6 @@
 set nu
 set guifont=Monospace\ 12
+set hlsearch
 "set cursorline
 "colorscheme wombat256
 highlight Normal guibg=black guifg=white
